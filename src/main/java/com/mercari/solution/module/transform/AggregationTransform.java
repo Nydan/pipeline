@@ -11,7 +11,9 @@ import com.mercari.solution.util.pipeline.select.SelectFunction;
 import org.apache.beam.sdk.coders.*;
 import org.apache.beam.sdk.transforms.*;
 import org.apache.beam.sdk.transforms.errorhandling.BadRecord;
+import org.apache.beam.sdk.transforms.windowing.GlobalWindow;
 import org.apache.beam.sdk.values.*;
+import org.joda.time.Instant;
 
 import java.io.Serializable;
 import java.util.*;
@@ -244,7 +246,7 @@ public class AggregationTransform extends Transform {
                 if(conditionNode != null && !Filter.filter(conditionNode, values)) {
                     return;
                 }
-                final Map<String,Object> result = Select.apply(selectFunctions, values, c.timestamp());
+                final Map<String,Object> result = Select.apply(selectFunctions, values, selectTimestamp(c.timestamp()));
                 final MElement output = MElement.of(schema, result, c.timestamp());
                 c.output(KV.of(input.getKey(), output));
             } catch (final Throwable e) {
@@ -253,6 +255,15 @@ public class AggregationTransform extends Transform {
             }
         }
 
+    }
+
+    // Beam emits a pane at the window's end when its elements arrived behind the output watermark,
+    // which in the global window is a year-294247 timestamp that BigQuery and Spanner reject.
+    static Instant selectTimestamp(final Instant timestamp) {
+        if(timestamp.isBefore(GlobalWindow.INSTANCE.maxTimestamp())) {
+            return timestamp;
+        }
+        return Instant.now();
     }
 
 }

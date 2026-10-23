@@ -3,8 +3,22 @@ package com.mercari.solution.module.transform;
 import com.mercari.solution.MPipeline;
 import com.mercari.solution.config.Config;
 import com.mercari.solution.module.*;
+import org.apache.beam.sdk.coders.KvCoder;
+import org.apache.beam.sdk.coders.StringUtf8Coder;
+import org.apache.beam.sdk.coders.VarLongCoder;
 import org.apache.beam.sdk.testing.PAssert;
 import org.apache.beam.sdk.testing.TestPipeline;
+import org.apache.beam.sdk.testing.TestStream;
+import org.apache.beam.sdk.transforms.DoFn;
+import org.apache.beam.sdk.transforms.ParDo;
+import org.apache.beam.sdk.transforms.Sum;
+import org.apache.beam.sdk.transforms.windowing.*;
+import org.apache.beam.sdk.values.KV;
+import org.apache.beam.sdk.values.PCollection;
+import org.apache.beam.sdk.values.TimestampedValue;
+import org.joda.time.Duration;
+import org.joda.time.Instant;
+import org.junit.Assert;
 import org.junit.Rule;
 import org.junit.Test;
 
@@ -172,6 +186,57 @@ public class AggregationTransformTest {
         });
 
         pipeline.run();
+    }
+
+    @Test
+    public void testSelectTimestamp() {
+        final Instant eventTime = Instant.parse("2026-10-22T11:00:00Z");
+        Assert.assertEquals(eventTime, AggregationTransform.selectTimestamp(eventTime));
+
+        final Instant replaced = AggregationTransform.selectTimestamp(GlobalWindow.INSTANCE.maxTimestamp());
+        Assert.assertTrue(replaced.isBefore(Instant.parse("9999-12-31T23:59:59Z")));
+    }
+
+    @Test
+    public void testLateElementInGlobalWindowPaneIsEmittedAtEndOfWindow() {
+        final Instant base = Instant.parse("2026-10-22T11:00:00Z");
+        final TestStream<KV<String, Long>> events = TestStream
+                .create(KvCoder.of(StringUtf8Coder.of(), VarLongCoder.of()))
+                .advanceWatermarkTo(base.plus(Duration.standardMinutes(10)))
+                .addElements(TimestampedValue.of(KV.of("user", 1L), base))
+                .advanceWatermarkToInfinity();
+
+        final PCollection<KV<Instant, Instant>> timestamps = pipeline
+                .apply(events)
+                .apply(Window.<KV<String, Long>>into(new GlobalWindows())
+                        .triggering(Repeatedly.forever(AfterPane.elementCountAtLeast(1)))
+                        .withTimestampCombiner(TimestampCombiner.LATEST)
+                        .accumulatingFiredPanes()
+                        .withAllowedLateness(Duration.ZERO))
+                .apply(Sum.longsPerKey())
+                .apply(ParDo.of(new PaneTimestampDoFn()));
+
+        PAssert.that(timestamps).satisfies(outputs -> {
+            int count = 0;
+            for(final KV<Instant, Instant> output : outputs) {
+                Assert.assertEquals(GlobalWindow.INSTANCE.maxTimestamp(), output.getKey());
+                Assert.assertTrue(output.getValue().isBefore(Instant.parse("9999-12-31T23:59:59Z")));
+                count++;
+            }
+            Assert.assertTrue(count > 0);
+            return null;
+        });
+
+        pipeline.run();
+    }
+
+    private static class PaneTimestampDoFn extends DoFn<KV<String, Long>, KV<Instant, Instant>> {
+
+        @ProcessElement
+        public void processElement(ProcessContext c) {
+            c.output(KV.of(c.timestamp(), AggregationTransform.selectTimestamp(c.timestamp())));
+        }
+
     }
 
 }
