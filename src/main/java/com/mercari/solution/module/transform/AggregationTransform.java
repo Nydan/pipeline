@@ -241,12 +241,13 @@ public class AggregationTransform extends Transform {
                 return;
             }
             final String groupKey = input.getKey();
-            final Map<String, Object> values = input.getValue();
+            final Map<String, Object> values = new HashMap<>(input.getValue());
+            final Object inputEpochMillis = values.remove(Aggregation.INPUT_EPOCH_MILLIS_KEY);
             try {
                 if(conditionNode != null && !Filter.filter(conditionNode, values)) {
                     return;
                 }
-                final Map<String,Object> result = Select.apply(selectFunctions, values, selectTimestamp(c.timestamp()));
+                final Map<String,Object> result = Select.apply(selectFunctions, values, selectTimestamp(c.timestamp(), inputEpochMillis));
                 final MElement output = MElement.of(schema, result, c.timestamp());
                 c.output(KV.of(input.getKey(), output));
             } catch (final Throwable e) {
@@ -259,11 +260,12 @@ public class AggregationTransform extends Transform {
 
     // Beam emits a pane at the window's end when its elements arrived behind the output watermark,
     // which in the global window is a year-294247 timestamp that BigQuery and Spanner reject.
-    static Instant selectTimestamp(final Instant timestamp) {
-        if(timestamp.isBefore(GlobalWindow.INSTANCE.maxTimestamp())) {
+    // Such panes get the latest input timestamp instead, or the earliest when the combiner is EARLIEST.
+    static Instant selectTimestamp(final Instant timestamp, final Object inputEpochMillis) {
+        if(timestamp.isBefore(GlobalWindow.INSTANCE.maxTimestamp()) || !(inputEpochMillis instanceof Long epochMillis)) {
             return timestamp;
         }
-        return Instant.now();
+        return Instant.ofEpochMilli(epochMillis);
     }
 
 }
